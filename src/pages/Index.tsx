@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef } from 'react';
-import { Activity, Cpu, FileBarChart, Settings, Zap, ChevronRight, AlertCircle, CheckCircle, Eye } from 'lucide-react';
+import { Activity, Cpu, FileBarChart, Settings, Zap, ChevronRight, AlertCircle, CheckCircle, Eye, Brain, Waves } from 'lucide-react';
 import heroImage from '@/assets/hero-banner.jpg';
 import { ImageAnalyzer } from '@/components/ImageAnalyzer';
 import { HueHistogram } from '@/components/HueHistogram';
@@ -8,6 +8,9 @@ import { PQIScoring } from '@/components/PQIScoring';
 import { AnalysisMetrics } from '@/components/AnalysisMetrics';
 import { BatchReport } from '@/components/BatchReport';
 import { CalibrationPanel } from '@/components/CalibrationPanel';
+import { TextureAnalysisPanel } from '@/components/TextureAnalysisPanel';
+import { AcrylamideRiskPanel } from '@/components/AcrylamideRiskPanel';
+import { GradCAMMap } from '@/components/GradCAMMap';
 import type { AnalysisResult } from '@/lib/colorAnalysis';
 import { getPQIStatus } from '@/lib/colorAnalysis';
 import { DEFAULT_CALIBRATION, type CalibrationData } from '@/lib/calibration';
@@ -19,14 +22,10 @@ function StatusDot({ status }: { status: 'online' | 'processing' | 'idle' }) {
   const colors = { online: '#22c55e', processing: '#f59e0b', idle: '#64748b' };
   return (
     <span className="relative flex h-2 w-2">
-      <span
-        className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
-        style={{ backgroundColor: colors[status] }}
-      />
-      <span
-        className="relative inline-flex rounded-full h-2 w-2"
-        style={{ backgroundColor: colors[status] }}
-      />
+      <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75"
+        style={{ backgroundColor: colors[status] }} />
+      <span className="relative inline-flex rounded-full h-2 w-2"
+        style={{ backgroundColor: colors[status] }} />
     </span>
   );
 }
@@ -35,18 +34,11 @@ function NavBtn({ active, onClick, icon: Icon, label, badge }: {
   active: boolean; onClick: () => void; icon: React.FC<any>; label: string; badge?: number;
 }) {
   return (
-    <button
-      onClick={onClick}
+    <button onClick={onClick}
       className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-display font-semibold tracking-wider transition-all duration-200 relative ${
-        active
-          ? 'text-primary-foreground'
-          : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'
+        active ? 'text-primary-foreground' : 'text-muted-foreground hover:text-foreground hover:bg-secondary/50'
       }`}
-      style={active ? {
-        background: 'var(--gradient-gold)',
-        boxShadow: '0 0 16px hsl(42 95% 52% / 0.35)',
-      } : {}}
-    >
+      style={active ? { background: 'var(--gradient-gold)', boxShadow: '0 0 16px hsl(42 95% 52% / 0.35)' } : {}}>
       <Icon className="w-4 h-4" />
       {label}
       {badge !== undefined && badge > 0 && (
@@ -72,7 +64,6 @@ export default function Index() {
     setResult(res);
     setCurrentImageSrc(imageSrc);
 
-    // Auto-log to batch
     const status = getPQIStatus(res.pqi);
     const record: BatchRecord = {
       id: Date.now().toString(),
@@ -100,21 +91,17 @@ export default function Index() {
       {/* Top header bar */}
       <header className="sticky top-0 z-50 border-b" style={{ borderColor: 'hsl(var(--panel-border))', background: 'hsl(220 20% 6% / 0.95)', backdropFilter: 'blur(12px)' }}>
         <div className="flex items-center h-14 px-4 gap-4">
-          {/* Logo */}
           <div className="flex items-center gap-3 flex-shrink-0">
             <div className="w-8 h-8 rounded flex items-center justify-center font-display text-sm font-bold"
-              style={{ background: 'var(--gradient-gold)', color: 'hsl(220 20% 7%)' }}>
-              Mc
-            </div>
+              style={{ background: 'var(--gradient-gold)', color: 'hsl(220 20% 7%)' }}>Mc</div>
             <div className="hidden sm:block">
               <div className="font-display text-base font-bold text-foreground leading-none">MacFry</div>
-              <div className="text-xs text-muted-foreground leading-none">SensoryVision Suite™</div>
+              <div className="text-xs text-muted-foreground leading-none">Deep-Sensory Vision V2™</div>
             </div>
           </div>
 
           <div className="hidden md:block h-6 w-px" style={{ background: 'hsl(var(--border))' }} />
 
-          {/* Nav tabs */}
           <nav className="flex items-center gap-1">
             <NavBtn active={activeTab === 'analysis'} onClick={() => setActiveTab('analysis')} icon={Eye} label="ANALYSIS" />
             <NavBtn active={activeTab === 'batch'} onClick={() => setActiveTab('batch')} icon={FileBarChart} label="BATCH" badge={batchRecords.length} />
@@ -123,7 +110,6 @@ export default function Index() {
 
           <div className="flex-1" />
 
-          {/* Status indicators */}
           <div className="flex items-center gap-4 text-xs text-muted-foreground">
             <div className="hidden sm:flex items-center gap-1.5">
               <StatusDot status={isAnalyzing ? 'processing' : result ? 'online' : 'idle'} />
@@ -143,20 +129,19 @@ export default function Index() {
             )}
 
             <div className="flex items-center gap-1.5">
-              <Cpu className="w-3.5 h-3.5 text-gold" />
-              <span className="text-gold font-mono-custom">CV ENGINE</span>
+              <Brain className="w-3.5 h-3.5" style={{ color: 'hsl(280 70% 60%)' }} />
+              <span style={{ color: 'hsl(280 70% 65%)' }} className="font-mono-custom">V2 ENGINE</span>
             </div>
           </div>
         </div>
 
-        {/* Alert bar - shown when result has issues */}
         {result && (result.processColorScore <= 2 || result.processColorScore >= 8 || result.defectScore >= 8) && (
           <div className="px-4 py-1.5 flex items-center gap-2 text-xs"
             style={{ background: 'hsl(0 75% 55% / 0.15)', borderTop: '1px solid hsl(0 75% 55% / 0.3)' }}>
             <AlertCircle className="w-3.5 h-3.5 text-destructive" />
             <span className="text-destructive font-display font-semibold">QUALITY ALERT</span>
             <ChevronRight className="w-3 h-3 text-destructive" />
-            <span style={{ color: 'hsl(0 75% 65%)' }}>Score 2/8 or 1/9 detected. Automatic PQI penalty applied. Review sample immediately.</span>
+            <span style={{ color: 'hsl(0 75% 65%)' }}>Score 2/8 or 1/9 detected. Fuzzy PQI penalty applied. Review sample immediately.</span>
           </div>
         )}
       </header>
@@ -167,21 +152,22 @@ export default function Index() {
         {activeTab === 'analysis' && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
 
-            {/* Left column: Image analyzer */}
-            <div className="lg:col-span-5 flex flex-col gap-4">
-              {/* Hero banner (shown when no image) */}
+            {/* Left column: Image + Metrics */}
+            <div className="lg:col-span-4 flex flex-col gap-4">
               {!result && !isAnalyzing && (
-                <div className="relative rounded-xl overflow-hidden border"
-                  style={{ borderColor: 'hsl(var(--panel-border))' }}>
+                <div className="relative rounded-xl overflow-hidden border" style={{ borderColor: 'hsl(var(--panel-border))' }}>
                   <img src={heroImage} alt="McCain fry quality control" className="w-full h-44 object-cover" />
                   <div className="absolute inset-0 flex flex-col justify-end p-4"
                     style={{ background: 'linear-gradient(to top, hsl(220 20% 7% / 0.95), transparent)' }}>
-                    <div className="font-display text-lg font-bold text-foreground">MacFry SensoryVision Suite™</div>
-                    <div className="text-xs text-muted-foreground">Industrial French Fry Quality Control System</div>
-                    <div className="flex gap-2 mt-2 text-xs">
-                      <span className="px-2 py-0.5 rounded" style={{ background: 'hsl(42 95% 52% / 0.2)', color: 'hsl(42 95% 65%)', border: '1px solid hsl(42 95% 52% / 0.3)' }}>USDA Color</span>
-                      <span className="px-2 py-0.5 rounded" style={{ background: 'hsl(142 70% 45% / 0.2)', color: 'hsl(142 70% 65%)', border: '1px solid hsl(142 70% 45% / 0.3)' }}>McDonald's PQI</span>
-                      <span className="px-2 py-0.5 rounded" style={{ background: 'hsl(210 80% 60% / 0.2)', color: 'hsl(210 80% 75%)', border: '1px solid hsl(210 80% 60% / 0.3)' }}>Farm Frites Hue</span>
+                    <div className="font-display text-lg font-bold text-foreground">Deep-Sensory Vision V2™</div>
+                    <div className="text-xs text-muted-foreground">Shadow-Aware · CIE ΔE₀₀ · FFT Texture · Fuzzy PQI</div>
+                    <div className="flex gap-2 mt-2 text-xs flex-wrap">
+                      {['CIE DE2000', 'Shadow Filter', 'FFT Crispness', 'Fuzzy Logic', 'Acrylamide'].map(tag => (
+                        <span key={tag} className="px-2 py-0.5 rounded"
+                          style={{ background: 'hsl(280 70% 55% / 0.15)', color: 'hsl(280 70% 70%)', border: '1px solid hsl(280 70% 55% / 0.3)' }}>
+                          {tag}
+                        </span>
+                      ))}
                     </div>
                   </div>
                 </div>
@@ -191,19 +177,12 @@ export default function Index() {
                 <div className="flex items-center gap-2 mb-3">
                   <Activity className="w-4 h-4 text-gold" />
                   <h2 className="font-display text-sm font-semibold tracking-wider">IMAGE INPUT</h2>
-                  <span className="ml-auto text-xs font-mono-custom text-muted-foreground">
-                    PPM: {calibration.ppm.toFixed(2)}
-                  </span>
+                  <span className="ml-auto text-xs font-mono-custom text-muted-foreground">PPM: {calibration.ppm.toFixed(2)}</span>
                 </div>
-                <ImageAnalyzer
-                  onAnalysisComplete={handleAnalysisComplete}
-                  calibration={calibration}
-                  isAnalyzing={isAnalyzing}
-                  setIsAnalyzing={setIsAnalyzing}
-                />
+                <ImageAnalyzer onAnalysisComplete={handleAnalysisComplete} calibration={calibration}
+                  isAnalyzing={isAnalyzing} setIsAnalyzing={setIsAnalyzing} />
               </div>
 
-              {/* Metrics panel */}
               {result && (
                 <div className="industrial-card p-4">
                   <div className="flex items-center gap-2 mb-3">
@@ -215,16 +194,15 @@ export default function Index() {
               )}
             </div>
 
-            {/* Middle column: Scoring */}
+            {/* Middle column: PQI + Hue + Texture */}
             <div className="lg:col-span-4 flex flex-col gap-4">
               {result ? (
                 <>
                   <div className="industrial-card p-4">
                     <div className="flex items-center gap-2 mb-3">
-                      <div className="w-4 h-4 rounded flex items-center justify-center text-xs font-bold"
-                        style={{ background: 'var(--gradient-gold)', color: 'hsl(220 20% 7%)' }}>P</div>
-                      <h2 className="font-display text-sm font-semibold tracking-wider">PQI SCORING</h2>
-                      <span className="ml-auto text-xs text-muted-foreground">McDonald's Formula</span>
+                      <Brain className="w-4 h-4" style={{ color: 'hsl(280 70% 60%)' }} />
+                      <h2 className="font-display text-sm font-semibold tracking-wider">FUZZY PQI SCORING</h2>
+                      <span className="ml-auto text-xs text-muted-foreground">Non-Linear Engine</span>
                     </div>
                     <PQIScoring result={result} />
                   </div>
@@ -232,24 +210,31 @@ export default function Index() {
                   <div className="industrial-card p-4">
                     <HueHistogram result={result} />
                   </div>
+
+                  {/* Texture FFT Analysis */}
+                  <div className="industrial-card p-4">
+                    <TextureAnalysisPanel texture={result.textureAnalysis} />
+                  </div>
                 </>
               ) : (
                 <div className="industrial-card p-8 flex flex-col items-center justify-center text-center gap-4 min-h-[300px]">
                   <div className="w-16 h-16 rounded-full flex items-center justify-center"
-                    style={{ background: 'hsl(42 95% 52% / 0.1)', border: '1px dashed hsl(42 95% 52% / 0.3)' }}>
-                    <Activity className="w-8 h-8 text-gold opacity-50" />
+                    style={{ background: 'hsl(280 70% 55% / 0.1)', border: '1px dashed hsl(280 70% 55% / 0.3)' }}>
+                    <Brain className="w-8 h-8 opacity-50" style={{ color: 'hsl(280 70% 60%)' }} />
                   </div>
                   <div>
-                    <p className="font-display text-base font-semibold text-muted-foreground">AWAITING SAMPLE</p>
-                    <p className="text-xs text-muted-foreground mt-1">Upload a fry sample image to begin PQI analysis</p>
+                    <p className="font-display text-base font-semibold text-muted-foreground">DEEP-SENSORY V2 READY</p>
+                    <p className="text-xs text-muted-foreground mt-1">Upload a fry sample to activate full analysis pipeline</p>
                   </div>
                   <div className="text-xs text-muted-foreground space-y-1 mt-2 text-left w-full max-w-xs">
                     {[
-                      'Process Color → USDA Chart classification',
-                      'Flesh Hue → Farm Frites Hue Score',
-                      'Color Variation → 1/3 Rule Mottling',
-                      'Defect Detection → Count + Heatmap',
-                      'PQI → McDonald\'s Bi-Directional 9pt',
+                      'White Balance → Shadow-invariant normalization',
+                      'CIE ΔE₀₀ → Perceptual color comparison',
+                      'Shadow Classifier → Artifact elimination',
+                      'FFT Spectral → Crispness scoring',
+                      'Fuzzy PQI → Non-linear quality index',
+                      'Maillard → Acrylamide risk estimation',
+                      'Grad-CAM → Explainable attribution map',
                     ].map((step, i) => (
                       <div key={i} className="flex items-center gap-2">
                         <CheckCircle className="w-3 h-3 text-gold flex-shrink-0" />
@@ -261,18 +246,37 @@ export default function Index() {
               )}
             </div>
 
-            {/* Right column: Heatmap + Defect detail */}
-            <div className="lg:col-span-3 flex flex-col gap-4">
+            {/* Right column: Heatmap + Grad-CAM + Acrylamide */}
+            <div className="lg:col-span-4 flex flex-col gap-4">
               {result ? (
                 <>
                   <div className="industrial-card p-4">
                     <DefectHeatmap result={result} />
                   </div>
 
+                  {/* Grad-CAM Attribution Map */}
+                  {result.gradCAMData && (
+                    <div className="industrial-card p-4">
+                      <GradCAMMap gradCAMData={result.gradCAMData} reasoning={result.fuzzyPQI?.reasoning || []} />
+                    </div>
+                  )}
+
+                  {/* Acrylamide Risk */}
+                  {result.acrylamideRisk && (
+                    <div className="industrial-card p-4">
+                      <AcrylamideRiskPanel risk={result.acrylamideRisk} deltaE={result.meanDeltaE} />
+                    </div>
+                  )}
+
                   {/* Defect list */}
                   {result.defects.length > 0 && (
                     <div className="industrial-card p-4">
-                      <h3 className="font-display text-sm font-semibold tracking-wider mb-3">DEFECT CATALOG</h3>
+                      <h3 className="font-display text-sm font-semibold tracking-wider mb-3">
+                        DEFECT CATALOG
+                        <span className="ml-2 text-xs font-mono-custom text-muted-foreground">
+                          ({result.shadowCount} shadows filtered)
+                        </span>
+                      </h3>
                       <div className="flex flex-col gap-1.5 max-h-60 overflow-y-auto">
                         {result.defects.slice(0, 20).map((defect, i) => {
                           const typeColors: Record<string, string> = {
@@ -287,9 +291,15 @@ export default function Index() {
                               <span className="font-display font-semibold" style={{ color }}>
                                 {defect.type.replace('_', ' ').toUpperCase()}
                               </span>
+                              {defect.contourPosition && (
+                                <span className="text-muted-foreground text-xs">({defect.contourPosition})</span>
+                              )}
                               <span className="text-muted-foreground ml-auto">
                                 {defect.areamm2?.toFixed(0) ?? defect.area.toFixed(0)}mm²
                               </span>
+                              {defect.deltaE !== undefined && (
+                                <span className="font-mono-custom text-muted-foreground">ΔE:{defect.deltaE.toFixed(0)}</span>
+                              )}
                               <span className="font-mono-custom" style={{ color }}>
                                 {(defect.severity * 100).toFixed(0)}%
                               </span>
@@ -319,14 +329,11 @@ export default function Index() {
                         const isTarget = row.val.includes('★');
                         const isCurrent = Math.abs(result.usdaColorScore - parseFloat(row.val)) < 0.15;
                         return (
-                          <div
-                            key={row.val}
-                            className="flex items-center gap-2 rounded px-2 py-1 transition-all"
+                          <div key={row.val} className="flex items-center gap-2 rounded px-2 py-1 transition-all"
                             style={{
                               border: isCurrent ? '1px solid hsl(42 95% 52% / 0.8)' : '1px solid transparent',
                               background: isCurrent ? 'hsl(42 95% 52% / 0.1)' : 'transparent',
-                            }}
-                          >
+                            }}>
                             <div className="w-8 h-4 rounded-sm flex-shrink-0" style={{ background: row.bg }} />
                             <span className="font-mono-custom text-xs" style={{ color: isTarget ? 'hsl(42 95% 65%)' : 'hsl(215 12% 50%)' }}>
                               {row.val}
@@ -342,8 +349,8 @@ export default function Index() {
               ) : (
                 <div className="industrial-card p-6 min-h-[200px] flex items-center justify-center">
                   <div className="text-center">
-                    <div className="text-xs text-muted-foreground mb-2">DEFECT HEATMAP</div>
-                    <div className="text-xs text-muted-foreground opacity-50">Jet colormap visualization<br />renders post-analysis</div>
+                    <div className="text-xs text-muted-foreground mb-2">DEFECT HEATMAP + GRAD-CAM</div>
+                    <div className="text-xs text-muted-foreground opacity-50">Shadow-aware heatmap<br />renders post-analysis</div>
                   </div>
                 </div>
               )}
@@ -370,15 +377,17 @@ export default function Index() {
       <footer className="border-t px-4 py-3 flex items-center justify-between text-xs text-muted-foreground"
         style={{ borderColor: 'hsl(var(--panel-border))', background: 'hsl(220 20% 6%)' }}>
         <div className="flex items-center gap-3">
-          <span className="font-display font-semibold text-gold">MacFry SensoryVision Suite™</span>
+          <span className="font-display font-semibold text-gold">MacFry Deep-Sensory V2™</span>
           <span>v2.0 Industrial</span>
         </div>
         <div className="flex items-center gap-3">
-          <span>McDonald's Bi-Directional 9-pt Scale</span>
+          <span>CIE ΔE₀₀</span>
           <span>•</span>
-          <span>USDA French Fry Color Standard</span>
+          <span>FFT Texture</span>
           <span>•</span>
-          <span>Farm Frites Hue Chart</span>
+          <span>Fuzzy Logic PQI</span>
+          <span>•</span>
+          <span>Grad-CAM</span>
         </div>
         <div className="text-gold font-mono-custom">© McCain Foods Confidential</div>
       </footer>
