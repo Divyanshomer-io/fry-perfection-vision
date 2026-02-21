@@ -3,7 +3,7 @@
 
 import { 
   cieDe2000, detectWhiteBalance, applyWhiteBalance, 
-  classifyShadow, computeNeighborVariance,
+  classifyShadow, computeNeighborVariance, computeEdgeSharpness,
   estimateAcrylamideRisk, getContourWeight,
   type WhiteBalanceResult, type AcrylamideRisk
 } from './cieDe2000';
@@ -229,15 +229,17 @@ export function detectDefects(
       const vDiff = meanV - cell.v;
       const hDiff = Math.abs(meanH - cell.h);
       
-      // Shadow classification
+      // Shadow classification with Laplacian edge sharpness
       const neighborVar = computeNeighborVariance(hsvGrid, validGrid, gy, gx, gridH, gridW);
+      const edgeSharpness = computeEdgeSharpness(hsvGrid, validGrid, gy, gx, gridH, gridW);
       const shadowResult = classifyShadow(
         cell.h, cell.s, cell.v, cell.r, cell.g, cell.b,
         meanH, meanS, meanV, meanR, meanG, meanB,
-        neighborVar
+        neighborVar,
+        edgeSharpness
       );
       
-      if (shadowResult.isShadow && shadowResult.confidence > 0.5) {
+      if (shadowResult.isShadow && shadowResult.confidence > 0.6) {
         shadowCount++;
         continue; // Skip shadows - don't mark as defects!
       }
@@ -309,9 +311,15 @@ function mergeAndFilterDefects(defects: DefectRegion[], imageWidth: number): Def
     let defectWidth = 0;
     for (const d of group) defectWidth += d.width;
     const stripCoverage = defectWidth / imageWidth;
+    const mottledInStrip = group.filter(d => d.type === 'mottled');
+    const contourWeightedDensity = group.reduce((sum, d) => sum + d.severity * (d.contourWeight ?? 1), 0);
+    const isSpatiallyCoherent = mottledInStrip.length >= 2 || contourWeightedDensity > 0.5;
     for (const d of group) {
       d.stripCoverage = stripCoverage;
-      if (d.type === 'mottled' && stripCoverage < 0.333) continue;
+      if (d.type === 'mottled') {
+        const hasSignificantWeight = (d.contourWeight ?? 1) >= 1.5;
+        if (!isSpatiallyCoherent && !hasSignificantWeight && stripCoverage < 0.2) continue;
+      }
       result.push(d);
     }
   }

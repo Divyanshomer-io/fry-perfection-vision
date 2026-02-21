@@ -89,15 +89,25 @@ ${colorConfig
 
 const ChartTooltip = RechartsPrimitive.Tooltip;
 
+/** Recharts tooltip payload item shape */
+export interface ChartTooltipPayloadItem {
+  name?: string;
+  value?: number | string;
+  dataKey?: string;
+  color?: string;
+  fill?: string;
+  payload?: Record<string, unknown>;
+}
+
 const ChartTooltipContent = React.forwardRef<
   HTMLDivElement,
   React.ComponentProps<"div"> & {
       active?: boolean;
-      payload?: any[];
-      label?: any;
-      labelFormatter?: (label: any, payload: any[]) => React.ReactNode;
+      payload?: ChartTooltipPayloadItem[];
+      label?: string | number;
+      labelFormatter?: (label: React.ReactNode, payload: ChartTooltipPayloadItem[]) => React.ReactNode;
       labelClassName?: string;
-      formatter?: (value: any, name: any, item: any, index: number, payload: any) => React.ReactNode;
+      formatter?: (value: number | string, name: string, item: ChartTooltipPayloadItem, index: number, payload: ChartTooltipPayloadItem[]) => React.ReactNode;
       color?: string;
       hideLabel?: boolean;
       hideIndicator?: boolean;
@@ -213,9 +223,9 @@ const ChartTooltipContent = React.forwardRef<
                         {nestLabel ? tooltipLabel : null}
                         <span className="text-muted-foreground">{itemConfig?.label || item.name}</span>
                       </div>
-                      {item.value && (
+                      {item.value != null && (
                         <span className="font-mono font-medium tabular-nums text-foreground">
-                          {item.value.toLocaleString()}
+                          {typeof item.value === 'number' ? item.value.toLocaleString() : String(item.value)}
                         </span>
                       )}
                     </div>
@@ -236,7 +246,7 @@ const ChartLegend = RechartsPrimitive.Legend;
 const ChartLegendContent = React.forwardRef<
   HTMLDivElement,
   React.ComponentProps<"div"> & {
-      payload?: any[];
+      payload?: ChartTooltipPayloadItem[];
       verticalAlign?: "top" | "bottom";
       hideIcon?: boolean;
       nameKey?: string;

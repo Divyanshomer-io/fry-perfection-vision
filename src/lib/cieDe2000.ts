@@ -147,20 +147,32 @@ export function detectWhiteBalance(imageData: ImageData): WhiteBalanceResult {
     refType = 'gray18';
     targetLum = 46;
   } else {
-    // Auto: use brightest 5% of pixels as reference
+    // Auto: prefer true neutral (low chroma) among bright pixels over raw brightest 5%
     refType = 'auto';
-    const allPixels: { r: number; g: number; b: number; lum: number }[] = [];
+    const allPixels: { r: number; g: number; b: number; lum: number; chroma: number }[] = [];
     for (let i = 0; i < width * height; i += 8) {
       const r = data[i * 4];
       const g = data[i * 4 + 1];
       const b = data[i * 4 + 2];
       const a = data[i * 4 + 3];
       if (a < 128) continue;
-      allPixels.push({ r, g, b, lum: (r + g + b) / 3 });
+      const maxC = Math.max(r, g, b);
+      const minC = Math.min(r, g, b);
+      const lum = (r + g + b) / 3;
+      const chroma = maxC - minC;
+      allPixels.push({ r, g, b, lum, chroma });
     }
-    allPixels.sort((a, b) => b.lum - a.lum);
-    refPixels = allPixels.slice(0, Math.max(10, Math.floor(allPixels.length * 0.05)));
-    targetLum = 220;
+    const brightPixels = allPixels.filter(p => p.lum > 150);
+    const neutralBright = brightPixels.filter(p => p.chroma < 25);
+    if (neutralBright.length >= 10) {
+      neutralBright.sort((a, b) => a.chroma - b.chroma);
+      refPixels = neutralBright.slice(0, Math.max(10, Math.floor(neutralBright.length * 0.3)));
+      targetLum = 220;
+    } else {
+      allPixels.sort((a, b) => (b.lum - a.lum) || (a.chroma - b.chroma));
+      refPixels = allPixels.slice(0, Math.max(10, Math.floor(allPixels.length * 0.05)));
+      targetLum = 220;
+    }
   }
   
   if (refPixels.length === 0) {
@@ -234,7 +246,8 @@ export function classifyShadow(
   cellR: number, cellG: number, cellB: number,
   meanH: number, meanS: number, meanV: number,
   meanR: number, meanG: number, meanB: number,
-  neighborVariance: number // HSV value variance of surrounding cells
+  neighborVariance: number, // HSV value variance of surrounding cells
+  edgeSharpness: number = 0 // Laplacian magnitude (0–1): high = sharp edge = defect
 ): ShadowClassification {
   // Criterion 1: RGB ratio preservation
   // Shadows darken uniformly, so R/G, R/B, G/B ratios remain similar
@@ -245,6 +258,11 @@ export function classifyShadow(
   
   const ratioDeviation = Math.abs(meanRatio_RG - cellRatio_RG) + Math.abs(meanRatio_RB - cellRatio_RB);
   const ratioPreserved = ratioDeviation < 0.3; // Shadows preserve ratios
+  
+  // Defect boost: sharp edge + ratio change = force defect, not shadow
+  if (edgeSharpness > 0.08 && ratioDeviation > 0.2) {
+    return { isShadow: false, confidence: 0, reason: 'Sharp edge with RGB ratio change indicates real defect' };
+  }
   
   // Criterion 2: Hue preservation
   let hueDiff = Math.abs(cellH - meanH);
@@ -276,8 +294,9 @@ export function classifyShadow(
   if (hueDiff > 25) shadowScore *= 0.3; // Large hue shift = not shadow
   if (cellV < 0.12) shadowScore *= 0.4; // Very very dark = could be real burn
   if (!ratioPreserved && hueDiff > 15) shadowScore *= 0.2; // Both ratios and hue shift
+  if (edgeSharpness > 0.12) shadowScore *= 0.3; // Sharp boundary = likely defect
   
-  const isShadow = shadowScore > 0.5;
+  const isShadow = shadowScore > 0.6;
   
   let reason = '';
   if (isShadow) {
@@ -291,6 +310,32 @@ export function classifyShadow(
   }
   
   return { isShadow, confidence: Math.min(1, shadowScore), reason };
+}
+
+/**
+ * Compute Laplacian-based edge sharpness for a cell
+ * Shadows = low Laplacian (soft gradient); Defects = high Laplacian (sharp boundary)
+ * Uses 3×3 kernel: [0,1,0; 1,-4,1; 0,1,0] on luminance/value grid
+ * Returns normalized magnitude 0–1
+ */
+export function computeEdgeSharpness(
+  grid: { v: number }[][],
+  validGrid: boolean[][],
+  gy: number, gx: number,
+  gridH: number, gridW: number
+): number {
+  const center = grid[gy]?.[gx]?.v ?? 0;
+  let laplacian = -4 * center;
+  let count = 0;
+  for (const [dy, dx] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+    const ny = gy + dy, nx = gx + dx;
+    if (ny >= 0 && ny < gridH && nx >= 0 && nx < gridW && validGrid[ny]?.[nx]) {
+      laplacian += grid[ny][nx].v;
+      count++;
+    }
+  }
+  const magnitude = Math.abs(laplacian);
+  return Math.min(1, magnitude / 4);
 }
 
 /**

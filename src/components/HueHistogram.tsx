@@ -11,8 +11,14 @@ function getHueColor(hueDegree: number): string {
   return `hsl(${hueDegree}, 80%, 50%)`;
 }
 
-const CustomTooltip = ({ active, payload, label }: any) => {
-  if (active && payload && payload.length) {
+interface HueTooltipProps {
+  active?: boolean;
+  payload?: Array<{ value?: number }>;
+  label?: string | number;
+}
+
+const CustomTooltip = ({ active, payload, label }: HueTooltipProps) => {
+  if (active && payload && payload.length && payload[0].value !== undefined) {
     return (
       <div className="industrial-card px-3 py-2 text-xs">
         <p className="font-display font-semibold text-gold">Hue: {label}°–{Number(label) + 10}°</p>

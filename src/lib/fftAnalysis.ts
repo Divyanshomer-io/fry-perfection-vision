@@ -80,7 +80,7 @@ export function analyzeTexture(imageData: ImageData): TextureAnalysis {
   const { data, width, height } = imageData;
   
   // Sample horizontal scanlines across the fry region
-  const numScanlines = Math.min(32, Math.floor(height / 4));
+  const numScanlines = Math.min(16, Math.floor(height / 4));
   const allSpectra: number[][] = [];
   
   for (let sy = 0; sy < numScanlines; sy++) {

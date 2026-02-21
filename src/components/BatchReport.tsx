@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Download, Trash2, Clock, BarChart2 } from 'lucide-react';
+import { Download, Trash2, Clock, BarChart2, FileSpreadsheet } from 'lucide-react';
 import type { BatchRecord } from '@/lib/pqiEngine';
 import { generateCSVReport, downloadCSV, getScoreColor } from '@/lib/pqiEngine';
+import { downloadMcFryExcel } from '@/lib/excelExport';
 import { getPQIStatus } from '@/lib/colorAnalysis';
 
 interface BatchReportProps {
@@ -22,10 +23,15 @@ export function BatchReport({ records, onClear }: BatchReportProps) {
   const avgDefects = records.length > 0 ? records.reduce((s, r) => s + r.defectCount, 0) / records.length : 0;
   const passRate = records.length > 0 ? (records.filter(r => r.pqi >= 75).length / records.length) * 100 : 0;
 
-  const handleExport = () => {
+  const handleExportCSV = () => {
     const csv = generateCSVReport(records);
     const now = new Date().toISOString().slice(0, 19).replace(/[:-]/g, '');
     downloadCSV(csv, `mccain_batch_report_${now}.csv`);
+  };
+
+  const handleExportExcel = () => {
+    const now = new Date().toISOString().slice(0, 19).replace(/[:-]/g, '');
+    downloadMcFryExcel(records, `mcfry_batch_${now}.xlsx`);
   };
 
   return (
@@ -71,10 +77,16 @@ export function BatchReport({ records, onClear }: BatchReportProps) {
           {records.length > 0 && (
             <>
               <button
-                onClick={handleExport}
+                onClick={handleExportCSV}
                 className="flex items-center gap-1 text-xs px-3 py-1 rounded border border-primary text-gold hover:bg-primary/10 transition-colors"
               >
                 <Download className="w-3 h-3" /> Export CSV
+              </button>
+              <button
+                onClick={handleExportExcel}
+                className="flex items-center gap-1 text-xs px-3 py-1 rounded border border-primary text-gold hover:bg-primary/10 transition-colors"
+              >
+                <FileSpreadsheet className="w-3 h-3" /> Export McFry Excel
               </button>
               <button
                 onClick={onClear}
