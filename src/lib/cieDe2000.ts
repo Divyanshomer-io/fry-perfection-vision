@@ -317,6 +317,9 @@ export function classifyShadow(
  * Shadows = low Laplacian (soft gradient); Defects = high Laplacian (sharp boundary)
  * Uses 3×3 kernel: [0,1,0; 1,-4,1; 0,1,0] on luminance/value grid
  * Returns normalized magnitude 0–1
+ * 
+ * Boundary handling: center term scales with valid neighbor count to avoid
+ * artificially inflated values at image edges or near invalid cells.
  */
 export function computeEdgeSharpness(
   grid: { v: number }[][],
@@ -325,17 +328,19 @@ export function computeEdgeSharpness(
   gridH: number, gridW: number
 ): number {
   const center = grid[gy]?.[gx]?.v ?? 0;
-  let laplacian = -4 * center;
+  let neighborSum = 0;
   let count = 0;
   for (const [dy, dx] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
     const ny = gy + dy, nx = gx + dx;
     if (ny >= 0 && ny < gridH && nx >= 0 && nx < gridW && validGrid[ny]?.[nx]) {
-      laplacian += grid[ny][nx].v;
+      neighborSum += grid[ny][nx].v;
       count++;
     }
   }
+  if (count === 0) return 0;
+  const laplacian = neighborSum - count * center;
   const magnitude = Math.abs(laplacian);
-  return Math.min(1, magnitude / 4);
+  return Math.min(1, magnitude / count);
 }
 
 /**
