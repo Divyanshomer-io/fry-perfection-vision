@@ -5,6 +5,7 @@ export interface CalibrationData {
   referenceLength: number; // known real-world length in mm
   pixelLength: number; // measured pixel length
   isCalibrated: boolean;
+  cellSizePx?: number; // analysis grid cell size in pixels (8-40, default 20)
 }
 
 export interface CalibrationLine {
@@ -42,6 +43,7 @@ export const DEFAULT_CALIBRATION: CalibrationData = {
   referenceLength: 25.4, // 1 inch = 25.4mm
   pixelLength: 96,
   isCalibrated: false,
+  cellSizePx: 20,
 };
 
 // McCain template size chart reference sizes (in mm)

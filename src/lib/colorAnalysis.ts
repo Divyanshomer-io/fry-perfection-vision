@@ -141,15 +141,21 @@ function getHueScore(meanH: number, meanS: number): { score: number; label: stri
   return { score: 5, label: 'Bright Light Golden (Target)' };
 }
 
+/** Fry foreground gate: exclude background/shadow cells (black tray, dark crevices) */
+function isFryCell(cellV: number, cellH: number): boolean {
+  if (cellV > 0.22) return true;
+  if (cellV > 0.15 && cellH >= 15 && cellH <= 75) return true;
+  return false;
+}
+
 /**
  * V2 Shadow-Aware Defect Detection with CIE DE2000 and Contour Weighting
  */
 export function detectDefects(
-  imageData: ImageData, ppm: number = 1, wb: WhiteBalanceResult | null = null
+  imageData: ImageData, ppm: number = 1, wb: WhiteBalanceResult | null = null, cellSize: number = 20
 ): { defects: DefectRegion[]; shadowCount: number } {
   const { data, width, height } = imageData;
   const defects: DefectRegion[] = [];
-  const cellSize = 20;
   const gridW = Math.ceil(width / cellSize);
   const gridH = Math.ceil(height / cellSize);
   
@@ -172,7 +178,6 @@ export function detectDefects(
           const a = data[idx + 3];
           if (a < 128) continue;
           
-          // Apply white balance
           if (wb) {
             [r, g, b] = applyWhiteBalance(r, g, b, wb);
           }
@@ -187,11 +192,14 @@ export function detectDefects(
       }
 
       if (count > 0) {
+        const cellV = totalV / count;
+        const cellH = totalH / count;
+        const isFry = isFryCell(cellV, cellH);
         hsvGrid[gy][gx] = { 
-          h: totalH / count, s: totalS / count, v: totalV / count,
+          h: cellH, s: totalS / count, v: cellV,
           r: totalR / count, g: totalG / count, b: totalB / count
         };
-        validGrid[gy][gx] = true;
+        validGrid[gy][gx] = isFry;
       } else {
         hsvGrid[gy][gx] = { h: 0, s: 0, v: 0, r: 0, g: 0, b: 0 };
         validGrid[gy][gx] = false;
@@ -336,6 +344,7 @@ export function generateHueHistogram(imageData: ImageData, wb: WhiteBalanceResul
     if (a < 128) continue;
     if (wb) [r, g, b] = applyWhiteBalance(r, g, b, wb);
     const hsv = rgbToHsv(r, g, b);
+    if (hsv.v < 0.18) continue; // Exclude background/shadow
     if (hsv.s > 0.1 && hsv.v > 0.15) {
       bins[Math.min(35, Math.floor(hsv.h / 10))]++;
       total++;
@@ -353,12 +362,14 @@ export function generateHeatmap(
   const gH = Math.ceil(height / gridSize);
   const heatmap: number[][] = [];
 
-  // Pre-compute mean RGB for shadow detection
+  // Pre-compute mean RGB for shadow detection (fry-only)
   let totalR = 0, totalG = 0, totalB = 0, pxCount = 0;
   for (let i = 0; i < width * height; i += 4) {
     let r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
     if (data[i * 4 + 3] < 128) continue;
     if (wb) [r, g, b] = applyWhiteBalance(r, g, b, wb);
+    const hsv = rgbToHsv(r, g, b);
+    if (hsv.v < 0.18) continue; // Exclude background/shadow
     totalR += r; totalG += g; totalB += b; pxCount++;
   }
   const mR = pxCount > 0 ? totalR / pxCount : 128;
@@ -379,9 +390,10 @@ export function generateHeatmap(
           const a = data[idx + 3];
           if (a < 128) continue;
           if (wb) [r, g, b] = applyWhiteBalance(r, g, b, wb);
+          const hsv = rgbToHsv(r, g, b);
+          if (hsv.v < 0.18) continue; // Exclude background/shadow
           
           cellR += r; cellG_c += g; cellB_c += b; cellCount++;
-          const hsv = rgbToHsv(r, g, b);
           if (hsv.s > 0.05 || hsv.v < 0.5) {
             sumBurn += 1 - hsv.v;
             count++;
@@ -413,7 +425,7 @@ export function generateHeatmap(
 }
 
 // Main analysis function - V2 Pipeline
-export async function analyzeImage(imageData: ImageData, ppm: number = 1): Promise<AnalysisResult> {
+export async function analyzeImage(imageData: ImageData, ppm: number = 1, cellSize: number = 20): Promise<AnalysisResult> {
   const start = Date.now();
   const { data, width, height } = imageData;
 
@@ -433,10 +445,10 @@ export async function analyzeImage(imageData: ImageData, ppm: number = 1): Promi
     const a = data[i * 4 + 3];
     if (a < 128) continue;
 
-    // Apply white balance correction
     [r, g, b] = applyWhiteBalance(r, g, b, whiteBalance);
 
     const hsv = rgbToHsv(r, g, b);
+    if (hsv.v < 0.18) continue; // Exclude background/shadow from pixel stats
     if (hsv.s < 0.05 && hsv.v > 0.9) continue;
 
     const [L, a_lab, b_lab] = rgbToLab(r, g, b);
@@ -473,7 +485,7 @@ export async function analyzeImage(imageData: ImageData, ppm: number = 1): Promi
   const { score: hueScore } = getHueScore(meanH, meanS);
 
   // Phase 2: Shadow-aware defect detection
-  const { defects, shadowCount } = detectDefects(imageData, ppm, whiteBalance);
+  const { defects, shadowCount } = detectDefects(imageData, ppm, whiteBalance, cellSize);
   const defectCount = defects.filter(d => !d.isShadow).length;
   const burnedRatio = burnedPixels / validPixels;
   const darkRatio = darkPixels / validPixels;
@@ -509,8 +521,8 @@ export async function analyzeImage(imageData: ImageData, ppm: number = 1): Promi
 
   // Heatmap + Grad-CAM
   const hueHistogram = generateHueHistogram(imageData, whiteBalance);
-  const heatmapData = generateHeatmap(imageData, 20, whiteBalance);
-  const gradCAMData = generateGradCAMData(heatmapData, defects, 20);
+  const heatmapData = generateHeatmap(imageData, cellSize, whiteBalance);
+  const gradCAMData = generateGradCAMData(heatmapData, defects, cellSize);
 
   const usdaLabel = getUsdaLabel(usdaColorScore);
 

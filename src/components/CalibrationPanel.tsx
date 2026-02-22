@@ -1,6 +1,7 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Ruler, RotateCcw } from 'lucide-react';
-import { calculatePPM, DEFAULT_CALIBRATION, type CalibrationData, type CalibrationLine } from '@/lib/calibration';
+import { toast } from 'sonner';
+import { DEFAULT_CALIBRATION, type CalibrationData } from '@/lib/calibration';
 
 interface CalibrationPanelProps {
   calibration: CalibrationData;
@@ -8,19 +9,28 @@ interface CalibrationPanelProps {
 }
 
 export function CalibrationPanel({ calibration, onCalibrationChange }: CalibrationPanelProps) {
-  const [refLength, setRefLength] = useState(25.4); // 1 inch default
-  const [pixelLength, setPixelLength] = useState<number>(96);
-  const [mode, setMode] = useState<'manual' | 'auto'>('manual');
+  const [refLength, setRefLength] = useState(calibration.referenceLength ?? 25.4);
+  const [pixelLength, setPixelLength] = useState<number>(calibration.pixelLength ?? 96);
+  const [cellSizePx, setCellSizePx] = useState<number>(calibration.cellSizePx ?? 20);
+
+  useEffect(() => {
+    setRefLength(calibration.referenceLength ?? 25.4);
+    setPixelLength(calibration.pixelLength ?? 96);
+    setCellSizePx(calibration.cellSizePx ?? 20);
+  }, [calibration.referenceLength, calibration.pixelLength, calibration.cellSizePx]);
 
   const handleManualCalibrate = () => {
     if (pixelLength > 0 && refLength > 0) {
       const ppm = pixelLength / refLength;
+      const cellSize = Math.max(8, Math.min(40, cellSizePx));
       onCalibrationChange({
         ppm,
         referenceLength: refLength,
         pixelLength,
         isCalibrated: true,
+        cellSizePx: cellSize,
       });
+      toast.success('Calibration applied. Re-analyze the image to use new settings.');
     }
   };
 
@@ -85,6 +95,20 @@ export function CalibrationPanel({ calibration, onCalibrationChange }: Calibrati
               min={1}
             />
           </div>
+        </div>
+
+        <div>
+          <label className="text-xs text-muted-foreground mb-1 block">Analysis cell size (px)</label>
+          <input
+            type="number"
+            value={cellSizePx}
+            onChange={e => setCellSizePx(Number(e.target.value))}
+            className="w-full rounded border border-border bg-input px-2 py-1.5 text-sm font-mono-custom text-foreground focus:border-primary outline-none"
+            min={8}
+            max={40}
+            step={2}
+          />
+          <div className="text-xs text-muted-foreground mt-0.5">Smaller = finer defect detection, more computation (8–40)</div>
         </div>
 
         <div className="flex gap-2">

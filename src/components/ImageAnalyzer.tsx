@@ -51,7 +51,8 @@ export function ImageAnalyzer({ onAnalysisComplete, calibration, isAnalyzing, se
       try {
         // Small delay for UI to update
         await new Promise(r => setTimeout(r, 50));
-        const result = await analyzeImage(imageData, calibration.ppm);
+        const cellSize = Math.max(8, Math.min(40, calibration.cellSizePx ?? 20));
+        const result = await analyzeImage(imageData, calibration.ppm, cellSize);
         setDefects(result.defects);
         onAnalysisComplete(result, imageData, url);
       } finally {
@@ -59,7 +60,7 @@ export function ImageAnalyzer({ onAnalysisComplete, calibration, isAnalyzing, se
       }
     };
     img.src = url;
-  }, [calibration.ppm, onAnalysisComplete, setIsAnalyzing]);
+  }, [calibration.ppm, calibration.cellSizePx, onAnalysisComplete, setIsAnalyzing]);
 
   // Draw defect overlay
   useEffect(() => {
@@ -90,23 +91,24 @@ export function ImageAnalyzer({ onAnalysisComplete, calibration, isAnalyzing, se
       ctx.fillText(label, defect.x + 2, defect.y - 2);
     }
 
-    // Draw fry analysis grid
+    // Draw fry analysis grid (match calibration cell size)
+    const cellSize = Math.max(8, Math.min(40, calibration.cellSizePx ?? 20));
     ctx.strokeStyle = 'rgba(0, 255, 100, 0.15)';
     ctx.lineWidth = 0.5;
     ctx.shadowBlur = 0;
-    for (let x = 0; x < main.width; x += 20) {
+    for (let x = 0; x < main.width; x += cellSize) {
       ctx.beginPath();
       ctx.moveTo(x, 0);
       ctx.lineTo(x, main.height);
       ctx.stroke();
     }
-    for (let y = 0; y < main.height; y += 20) {
+    for (let y = 0; y < main.height; y += cellSize) {
       ctx.beginPath();
       ctx.moveTo(0, y);
       ctx.lineTo(main.width, y);
       ctx.stroke();
     }
-  }, [defects, showOverlay]);
+  }, [defects, showOverlay, calibration.cellSizePx]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
