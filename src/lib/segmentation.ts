@@ -1,155 +1,133 @@
 /**
- * Instance Segmentation Engine
+ * Instance Segmentation Engine V2
  * 
- * Implements:
- * - LAB L-channel isolation
- * - CLAHE (Contrast Limited Adaptive Histogram Equalization)
- * - Adaptive thresholding
- * - Morphological operations (open/close/erode)
- * - Distance Transform + Watershed for touching object separation
- * - Contour extraction with smoothing
- * - Non-fry filtering (aspect ratio, area)
+ * Fixed: proper Moore boundary tracing, HSV-based fry detection,
+ * connected component labeling, and clean contour rendering.
  */
 
 export interface Contour {
   points: { x: number; y: number }[];
   boundingBox: { x: number; y: number; w: number; h: number };
   area: number;
-  color: string; // display color for overlay
+  color: string;
 }
 
 export interface SegmentationResult {
   contours: Contour[];
-  mask: Uint8Array; // binary mask (255 = fry, 0 = background)
+  mask: Uint8Array;
   width: number;
   height: number;
   processingTime: number;
 }
 
-// ── RGB → L (CIE LAB lightness) ──
-function rgbToL(r: number, g: number, b: number): number {
-  let rr = r / 255, gg = g / 255, bb = b / 255;
-  rr = rr > 0.04045 ? Math.pow((rr + 0.055) / 1.055, 2.4) : rr / 12.92;
-  gg = gg > 0.04045 ? Math.pow((gg + 0.055) / 1.055, 2.4) : gg / 12.92;
-  bb = bb > 0.04045 ? Math.pow((bb + 0.055) / 1.055, 2.4) : bb / 12.92;
-  const Y = rr * 0.2126 + gg * 0.7152 + bb * 0.0722;
-  const fy = Y > 0.008856 ? Math.cbrt(Y) : 7.787 * Y + 16 / 116;
-  return 116 * fy - 16;
+// ── RGB → HSV ──
+function rgbToHsv(r: number, g: number, b: number): [number, number, number] {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const d = max - min;
+  let h = 0;
+  const s = max === 0 ? 0 : d / max;
+  const v = max;
+  if (d > 0) {
+    if (max === r) h = ((g - b) / d) % 6;
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h = Math.round(h * 60);
+    if (h < 0) h += 360;
+  }
+  return [h, s, v];
 }
 
-// ── CLAHE on single-channel image ──
-function applyCLAHE(
-  channel: Float32Array, w: number, h: number,
-  clipLimit: number = 3.0, tileW: number = 8, tileH: number = 8
-): Float32Array {
-  const out = new Float32Array(channel.length);
-  const tilesX = Math.max(1, Math.ceil(w / tileW));
-  const tilesY = Math.max(1, Math.ceil(h / tileH));
-  const numBins = 256;
-
-  // Build per-tile histograms and CDFs
-  const cdfs: Float32Array[][] = [];
-  for (let ty = 0; ty < tilesY; ty++) {
-    cdfs[ty] = [];
-    for (let tx = 0; tx < tilesX; tx++) {
-      const hist = new Float32Array(numBins);
-      let count = 0;
-      const x0 = tx * tileW, y0 = ty * tileH;
-      const x1 = Math.min(x0 + tileW, w), y1 = Math.min(y0 + tileH, h);
-      for (let y = y0; y < y1; y++) {
-        for (let x = x0; x < x1; x++) {
-          const bin = Math.min(255, Math.max(0, Math.round(channel[y * w + x])));
-          hist[bin]++;
-          count++;
-        }
-      }
-      if (count === 0) count = 1;
-
-      // Clip histogram
-      const clipThreshold = clipLimit * (count / numBins);
-      let excess = 0;
-      for (let i = 0; i < numBins; i++) {
-        if (hist[i] > clipThreshold) {
-          excess += hist[i] - clipThreshold;
-          hist[i] = clipThreshold;
-        }
-      }
-      const redistrib = excess / numBins;
-      for (let i = 0; i < numBins; i++) hist[i] += redistrib;
-
-      // CDF
-      const cdf = new Float32Array(numBins);
-      cdf[0] = hist[0];
-      for (let i = 1; i < numBins; i++) cdf[i] = cdf[i - 1] + hist[i];
-      const cdfMin = cdf[0];
-      const scale = count - cdfMin > 0 ? 255 / (count - cdfMin) : 1;
-      for (let i = 0; i < numBins; i++) {
-        cdf[i] = Math.max(0, Math.min(255, (cdf[i] - cdfMin) * scale));
-      }
-      cdfs[ty][tx] = cdf;
+// ── Step 1: Color-based fry detection ──
+// Fries are golden/yellow/brown. Background can be anything.
+// We detect fry-like pixels based on hue + saturation + value ranges
+function createFryMask(data: Uint8Array, w: number, h: number): Uint8Array {
+  const mask = new Uint8Array(w * h);
+  
+  // First pass: collect stats on all pixels to determine background
+  const hueHist = new Float32Array(360);
+  const valHist = new Float32Array(256);
+  let totalPx = 0;
+  
+  for (let i = 0; i < w * h; i++) {
+    const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+    const a = data[i * 4 + 3];
+    if (a < 128) continue;
+    const [hh, ss, vv] = rgbToHsv(r, g, b);
+    if (ss > 0.05) hueHist[hh]++;
+    valHist[Math.round(vv * 255)]++;
+    totalPx++;
+  }
+  
+  // Find dominant background hue (highest peak that's NOT in fry range)
+  // Fry hues are roughly 15-55 (golden/yellow/brown)
+  let bgHue = -1, bgHueCount = 0;
+  // Smooth hue histogram
+  for (let h = 0; h < 360; h++) {
+    let sum = 0;
+    for (let dh = -5; dh <= 5; dh++) {
+      sum += hueHist[(h + dh + 360) % 360];
+    }
+    if (sum > bgHueCount) {
+      bgHueCount = sum;
+      bgHue = h;
     }
   }
-
-  // Apply with bilinear interpolation between tile CDFs
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const bin = Math.min(255, Math.max(0, Math.round(channel[y * w + x])));
-      const tx = Math.min(tilesX - 1, Math.floor(x / tileW));
-      const ty = Math.min(tilesY - 1, Math.floor(y / tileH));
-      out[y * w + x] = cdfs[ty][tx][bin];
+  
+  // Determine if background is colored or neutral
+  const bgIsFryLike = bgHue >= 15 && bgHue <= 55;
+  
+  // Second pass: classify each pixel
+  for (let i = 0; i < w * h; i++) {
+    const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+    const a = data[i * 4 + 3];
+    if (a < 128) continue;
+    
+    const [hh, ss, vv] = rgbToHsv(r, g, b);
+    
+    // A pixel is "fry" if it matches fry color profile
+    // Fries: hue 10-65 (orange-brown to yellow), sat 0.15-0.85, val 0.25-0.95
+    const isFryHue = (hh >= 10 && hh <= 65) || (hh >= 350 || hh <= 10); // include reddish-brown
+    const isFrySat = ss >= 0.12 && ss <= 0.90;
+    const isFryVal = vv >= 0.20 && vv <= 0.95;
+    
+    // Also include very dark burnt regions (low V, low S)
+    const isBurnt = vv < 0.25 && ss < 0.4 && vv > 0.03;
+    
+    // Exclude background: if pixel hue is close to bgHue and background isn't fry-colored
+    let isBackground = false;
+    if (!bgIsFryLike && bgHue >= 0) {
+      let hueDist = Math.abs(hh - bgHue);
+      if (hueDist > 180) hueDist = 360 - hueDist;
+      // If hue is within 20° of background hue, likely background
+      if (hueDist < 20 && ss > 0.08) {
+        isBackground = true;
+      }
+    }
+    
+    // Exclude very white/bright unsaturated pixels (paper/tray highlights)
+    const isWhite = vv > 0.85 && ss < 0.10;
+    
+    if (!isBackground && !isWhite && ((isFryHue && isFrySat && isFryVal) || isBurnt)) {
+      mask[i] = 255;
     }
   }
-  return out;
+  
+  return mask;
 }
 
-// ── Adaptive Threshold (mean-based) ──
-function adaptiveThreshold(
-  channel: Float32Array, w: number, h: number, blockSize: number = 15, C: number = 5
-): Uint8Array {
-  const result = new Uint8Array(w * h);
-  const halfBlock = Math.floor(blockSize / 2);
-
-  // Integral image for fast mean computation
-  const integral = new Float64Array((w + 1) * (h + 1));
-  for (let y = 0; y < h; y++) {
-    let rowSum = 0;
-    for (let x = 0; x < w; x++) {
-      rowSum += channel[y * w + x];
-      integral[(y + 1) * (w + 1) + (x + 1)] = rowSum + integral[y * (w + 1) + (x + 1)];
-    }
-  }
-
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const y0 = Math.max(0, y - halfBlock);
-      const y1 = Math.min(h - 1, y + halfBlock);
-      const x0 = Math.max(0, x - halfBlock);
-      const x1 = Math.min(w - 1, x + halfBlock);
-      const area = (y1 - y0 + 1) * (x1 - x0 + 1);
-      const sum = integral[(y1 + 1) * (w + 1) + (x1 + 1)]
-                - integral[y0 * (w + 1) + (x1 + 1)]
-                - integral[(y1 + 1) * (w + 1) + x0]
-                + integral[y0 * (w + 1) + x0];
-      const mean = sum / area;
-      result[y * w + x] = channel[y * w + x] > mean - C ? 255 : 0;
-    }
-  }
-  return result;
-}
-
-// ── Morphological Operations ──
-function dilate(mask: Uint8Array, w: number, h: number, kernelSize: number = 3): Uint8Array {
+// ── Morphological operations ──
+function dilate(mask: Uint8Array, w: number, h: number, k: number = 3): Uint8Array {
   const out = new Uint8Array(mask.length);
-  const half = Math.floor(kernelSize / 2);
+  const half = Math.floor(k / 2);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       let maxVal = 0;
       for (let ky = -half; ky <= half; ky++) {
         for (let kx = -half; kx <= half; kx++) {
           const ny = y + ky, nx = x + kx;
-          if (ny >= 0 && ny < h && nx >= 0 && nx < w) {
+          if (ny >= 0 && ny < h && nx >= 0 && nx < w)
             maxVal = Math.max(maxVal, mask[ny * w + nx]);
-          }
         }
       }
       out[y * w + x] = maxVal;
@@ -158,18 +136,17 @@ function dilate(mask: Uint8Array, w: number, h: number, kernelSize: number = 3):
   return out;
 }
 
-function erode(mask: Uint8Array, w: number, h: number, kernelSize: number = 3): Uint8Array {
+function erode(mask: Uint8Array, w: number, h: number, k: number = 3): Uint8Array {
   const out = new Uint8Array(mask.length);
-  const half = Math.floor(kernelSize / 2);
+  const half = Math.floor(k / 2);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       let minVal = 255;
       for (let ky = -half; ky <= half; ky++) {
         for (let kx = -half; kx <= half; kx++) {
           const ny = y + ky, nx = x + kx;
-          if (ny >= 0 && ny < h && nx >= 0 && nx < w) {
+          if (ny >= 0 && ny < h && nx >= 0 && nx < w)
             minVal = Math.min(minVal, mask[ny * w + nx]);
-          }
         }
       }
       out[y * w + x] = minVal;
@@ -178,184 +155,146 @@ function erode(mask: Uint8Array, w: number, h: number, kernelSize: number = 3): 
   return out;
 }
 
-function morphOpen(mask: Uint8Array, w: number, h: number, k: number = 3): Uint8Array {
-  return dilate(erode(mask, w, h, k), w, h, k);
-}
-
-function morphClose(mask: Uint8Array, w: number, h: number, k: number = 3): Uint8Array {
-  return erode(dilate(mask, w, h, k), w, h, k);
-}
-
-// ── Distance Transform (Chamfer 3-4) ──
-function distanceTransform(mask: Uint8Array, w: number, h: number): Float32Array {
-  const dist = new Float32Array(w * h);
-  const INF = w + h;
-
-  // Initialize
-  for (let i = 0; i < mask.length; i++) {
-    dist[i] = mask[i] > 0 ? INF : 0;
-  }
-
-  // Forward pass
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const idx = y * w + x;
-      if (dist[idx] === 0) continue;
-      dist[idx] = Math.min(
-        dist[idx],
-        dist[(y - 1) * w + (x - 1)] + 4,
-        dist[(y - 1) * w + x] + 3,
-        dist[(y - 1) * w + (x + 1)] + 4,
-        dist[y * w + (x - 1)] + 3
-      );
-    }
-  }
-
-  // Backward pass
-  for (let y = h - 2; y >= 1; y--) {
-    for (let x = w - 2; x >= 1; x--) {
-      const idx = y * w + x;
-      if (dist[idx] === 0) continue;
-      dist[idx] = Math.min(
-        dist[idx],
-        dist[(y + 1) * w + (x + 1)] + 4,
-        dist[(y + 1) * w + x] + 3,
-        dist[(y + 1) * w + (x - 1)] + 4,
-        dist[y * w + (x + 1)] + 3
-      );
-    }
-  }
-
-  return dist;
-}
-
-// ── Watershed-style label propagation ──
-function watershedLabeling(
-  mask: Uint8Array, dist: Float32Array, w: number, h: number
-): Int32Array {
+// ── Connected Component Labeling (4-connected) ──
+function connectedComponents(mask: Uint8Array, w: number, h: number): { labels: Int32Array; count: number } {
   const labels = new Int32Array(w * h);
   let nextLabel = 1;
 
-  // Find local maxima in distance transform as seeds
-  const seeds: { x: number; y: number; dist: number }[] = [];
-  const minSeedDist = 6; // minimum distance for a seed
-
-  for (let y = 2; y < h - 2; y++) {
-    for (let x = 2; x < w - 2; x++) {
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
       const idx = y * w + x;
-      if (mask[idx] === 0 || dist[idx] < minSeedDist) continue;
+      if (mask[idx] === 0 || labels[idx] !== 0) continue;
 
-      let isMax = true;
-      for (let dy = -2; dy <= 2 && isMax; dy++) {
-        for (let dx = -2; dx <= 2 && isMax; dx++) {
-          if (dy === 0 && dx === 0) continue;
-          const ni = (y + dy) * w + (x + dx);
-          if (dist[ni] > dist[idx]) isMax = false;
-        }
-      }
-      if (isMax) seeds.push({ x, y, dist: dist[idx] });
-    }
-  }
+      // BFS flood fill
+      const label = nextLabel++;
+      const queue: number[] = [idx];
+      labels[idx] = label;
 
-  // Merge seeds that are too close
-  const mergedSeeds: typeof seeds = [];
-  const used = new Set<number>();
-  for (let i = 0; i < seeds.length; i++) {
-    if (used.has(i)) continue;
-    let sx = seeds[i].x, sy = seeds[i].y, sd = seeds[i].dist, cnt = 1;
-    for (let j = i + 1; j < seeds.length; j++) {
-      if (used.has(j)) continue;
-      const dx = seeds[i].x - seeds[j].x, dy = seeds[i].y - seeds[j].y;
-      if (Math.sqrt(dx * dx + dy * dy) < minSeedDist * 2) {
-        sx += seeds[j].x; sy += seeds[j].y;
-        sd = Math.max(sd, seeds[j].dist);
-        cnt++;
-        used.add(j);
-      }
-    }
-    mergedSeeds.push({ x: Math.round(sx / cnt), y: Math.round(sy / cnt), dist: sd });
-  }
+      while (queue.length > 0) {
+        const ci = queue.pop()!;
+        const cy = Math.floor(ci / w), cx = ci % w;
 
-  // Assign labels from seeds via BFS, sorted by distance (highest first)
-  mergedSeeds.sort((a, b) => b.dist - a.dist);
-  
-  interface QueueItem { x: number; y: number }
-  
-  for (const seed of mergedSeeds) {
-    const label = nextLabel++;
-    const queue: QueueItem[] = [{ x: seed.x, y: seed.y }];
-    labels[seed.y * w + seed.x] = label;
-
-    while (queue.length > 0) {
-      const { x, y } = queue.shift()!;
-      for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1]]) {
-        const nx = x + dx, ny = y + dy;
-        if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
-        const ni = ny * w + nx;
-        if (labels[ni] !== 0 || mask[ni] === 0) continue;
-        labels[ni] = label;
-        queue.push({ x: nx, y: ny });
-      }
-    }
-  }
-
-  // Label any remaining foreground pixels not reached by seeds
-  for (let i = 0; i < mask.length; i++) {
-    if (mask[i] > 0 && labels[i] === 0) {
-      // Assign to nearest labeled neighbor via small BFS
-      const startY = Math.floor(i / w), startX = i % w;
-      const q: QueueItem[] = [{ x: startX, y: startY }];
-      const visited = new Set<number>();
-      visited.add(i);
-      let found = false;
-      while (q.length > 0 && !found) {
-        const { x, y } = q.shift()!;
-        for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1]]) {
-          const nx = x + dx, ny = y + dy;
+        for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+          const nx = cx + dx, ny = cy + dy;
           if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
           const ni = ny * w + nx;
-          if (visited.has(ni)) continue;
-          visited.add(ni);
-          if (labels[ni] > 0) {
-            // Found a labeled pixel - assign all visited to this label
-            const lbl = labels[ni];
-            for (const vi of visited) {
-              if (mask[vi] > 0) labels[vi] = lbl;
-            }
-            found = true;
-            break;
+          if (mask[ni] > 0 && labels[ni] === 0) {
+            labels[ni] = label;
+            queue.push(ni);
           }
-          if (mask[ni] > 0) q.push({ x: nx, y: ny });
         }
       }
     }
   }
 
-  return labels;
+  return { labels, count: nextLabel - 1 };
 }
 
-// ── Contour Tracing (simplified marching squares) ──
+// ── Moore Boundary Tracing ──
+// Traces the outer boundary of a single labeled region
+function traceBoundary(
+  labels: Int32Array, w: number, h: number, label: number
+): { x: number; y: number }[] {
+  // Find starting pixel: topmost, then leftmost pixel of this label
+  let startX = -1, startY = -1;
+  outer:
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (labels[y * w + x] === label) {
+        startX = x;
+        startY = y;
+        break outer;
+      }
+    }
+  }
+  if (startX < 0) return [];
+
+  // Moore neighbor tracing
+  // 8-connected neighbors in clockwise order starting from left
+  const dx = [-1, -1, 0, 1, 1, 1, 0, -1];
+  const dy = [0, -1, -1, -1, 0, 1, 1, 1];
+
+  const boundary: { x: number; y: number }[] = [];
+  let cx = startX, cy = startY;
+  let dir = 0; // start looking left
+  const maxIter = w * h * 2; // safety limit
+  let iter = 0;
+
+  do {
+    boundary.push({ x: cx, y: cy });
+
+    // Search for next boundary pixel
+    // Start from (dir + 5) % 8 to backtrack properly
+    let searchDir = (dir + 5) % 8;
+    let found = false;
+
+    for (let i = 0; i < 8; i++) {
+      const nd = (searchDir + i) % 8;
+      const nx = cx + dx[nd], ny = cy + dy[nd];
+
+      if (nx >= 0 && nx < w && ny >= 0 && ny < h && labels[ny * w + nx] === label) {
+        cx = nx;
+        cy = ny;
+        dir = nd;
+        found = true;
+        break;
+      }
+    }
+
+    if (!found) break;
+    iter++;
+  } while ((cx !== startX || cy !== startY) && iter < maxIter);
+
+  return boundary;
+}
+
+// ── Simplify contour points (Ramer-Douglas-Peucker) ──
+function simplifyContour(
+  points: { x: number; y: number }[], epsilon: number
+): { x: number; y: number }[] {
+  if (points.length < 3) return points;
+
+  // Find the point with the maximum distance from the line between first and last
+  let maxDist = 0, maxIdx = 0;
+  const start = points[0], end = points[points.length - 1];
+  const dx = end.x - start.x, dy = end.y - start.y;
+  const lenSq = dx * dx + dy * dy;
+
+  for (let i = 1; i < points.length - 1; i++) {
+    let dist: number;
+    if (lenSq === 0) {
+      dist = Math.hypot(points[i].x - start.x, points[i].y - start.y);
+    } else {
+      const t = Math.max(0, Math.min(1, ((points[i].x - start.x) * dx + (points[i].y - start.y) * dy) / lenSq));
+      const projX = start.x + t * dx, projY = start.y + t * dy;
+      dist = Math.hypot(points[i].x - projX, points[i].y - projY);
+    }
+    if (dist > maxDist) { maxDist = dist; maxIdx = i; }
+  }
+
+  if (maxDist > epsilon) {
+    const left = simplifyContour(points.slice(0, maxIdx + 1), epsilon);
+    const right = simplifyContour(points.slice(maxIdx), epsilon);
+    return [...left.slice(0, -1), ...right];
+  }
+  return [start, end];
+}
+
+// ── Extract contours from labeled components ──
 function extractContours(
-  labels: Int32Array, w: number, h: number, mask: Uint8Array
+  labels: Int32Array, w: number, h: number, componentCount: number
 ): Contour[] {
   const contourColors = [
     '#00ffcc', '#ff6b35', '#00d4ff', '#ff3366', '#88ff00',
     '#ff00aa', '#00ff88', '#ffaa00', '#6644ff', '#ff4444',
+    '#00ffaa', '#dd44ff', '#44ddff', '#ffdd00', '#ff0066',
   ];
-
-  const uniqueLabels = new Set<number>();
-  for (let i = 0; i < labels.length; i++) {
-    if (labels[i] > 0) uniqueLabels.add(labels[i]);
-  }
 
   const contours: Contour[] = [];
 
-  for (const label of uniqueLabels) {
-    // Find bounding box and boundary pixels
-    let minX = w, minY = h, maxX = 0, maxY = 0;
-    let area = 0;
-    const boundary: { x: number; y: number }[] = [];
-
+  for (let label = 1; label <= componentCount; label++) {
+    // Compute area and bounding box
+    let area = 0, minX = w, minY = h, maxX = 0, maxY = 0;
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         if (labels[y * w + x] !== label) continue;
@@ -364,41 +303,32 @@ function extractContours(
         if (x > maxX) maxX = x;
         if (y < minY) minY = y;
         if (y > maxY) maxY = y;
-
-        // Is boundary? Check 4-neighbors
-        let isBoundary = false;
-        for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1]]) {
-          const nx = x + dx, ny = y + dy;
-          if (nx < 0 || nx >= w || ny < 0 || ny >= h || labels[ny * w + nx] !== label) {
-            isBoundary = true;
-            break;
-          }
-        }
-        if (isBoundary) boundary.push({ x, y });
       }
     }
 
-    // Filter: min area, aspect ratio rejection
+    // Filter: minimum area
+    if (area < 300) continue;
+
     const bw = maxX - minX + 1;
     const bh = maxY - minY + 1;
-    if (area < 200) continue; // Too small
+
+    // Filter: reject very square + small objects (likely markers/noise)
     const aspect = Math.max(bw, bh) / Math.max(1, Math.min(bw, bh));
-    if (aspect < 1.2 && area < 1000) continue; // Square-ish & small = likely marker/artifact
+    if (aspect < 1.3 && area < 2000) continue;
 
-    // Sort boundary points into a rough contour by angle from centroid
-    const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2;
-    boundary.sort((a, b) => {
-      const angleA = Math.atan2(a.y - cy, a.x - cx);
-      const angleB = Math.atan2(b.y - cy, b.x - cx);
-      return angleA - angleB;
-    });
+    // Trace boundary
+    let boundary = traceBoundary(labels, w, h, label);
+    if (boundary.length < 10) continue;
 
-    // Subsample for smooth rendering
-    const step = Math.max(1, Math.floor(boundary.length / 100));
-    const smoothed = boundary.filter((_, i) => i % step === 0);
+    // Simplify contour
+    const epsilon = Math.max(1.5, Math.sqrt(area) / 25);
+    boundary = simplifyContour(boundary, epsilon);
+
+    // Need at least 4 points for a meaningful contour
+    if (boundary.length < 4) continue;
 
     contours.push({
-      points: smoothed,
+      points: boundary,
       boundingBox: { x: minX, y: minY, w: bw, h: bh },
       area,
       color: contourColors[contours.length % contourColors.length],
@@ -413,41 +343,29 @@ export function segmentFries(imageData: ImageData): SegmentationResult {
   const start = performance.now();
   const { data, width: w, height: h } = imageData;
 
-  // Step 1: Extract L-channel
-  const lChannel = new Float32Array(w * h);
-  for (let i = 0; i < w * h; i++) {
-    const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
-    lChannel[i] = (rgbToL(r, g, b) / 100) * 255; // normalize to 0-255
-  }
+  // Step 1: Color-based fry mask
+  let mask = createFryMask(data as unknown as Uint8Array, w, h);
 
-  // Step 2: CLAHE
-  const tileSize = Math.max(16, Math.round(Math.min(w, h) / 8));
-  const enhanced = applyCLAHE(lChannel, w, h, 3.0, tileSize, tileSize);
+  // Step 2: Morphological cleanup
+  // Close small gaps in fry regions
+  mask = dilate(mask, w, h, 5);
+  mask = erode(mask, w, h, 5);
+  // Remove small noise
+  mask = erode(mask, w, h, 3);
+  mask = dilate(mask, w, h, 3);
 
-  // Step 3: Adaptive threshold
-  const blockSize = Math.max(11, Math.round(Math.min(w, h) / 20) | 1);
-  let binary = adaptiveThreshold(enhanced, w, h, blockSize, 8);
+  // Step 3: Erode 2x for shadow buffer (shrink borders inward ~2-3px)
+  mask = erode(mask, w, h, 3);
+  mask = erode(mask, w, h, 3);
 
-  // Step 4: Morphological cleanup
-  binary = morphClose(binary, w, h, 5); // close small gaps
-  binary = morphOpen(binary, w, h, 3);  // remove small noise
+  // Step 4: Connected component labeling
+  const { labels, count } = connectedComponents(mask, w, h);
 
-  // Step 5: Erode 2 iterations with 3x3 kernel (shadow buffer)
-  binary = erode(binary, w, h, 3);
-  binary = erode(binary, w, h, 3);
-
-  // Step 6: Distance Transform
-  const dist = distanceTransform(binary, w, h);
-
-  // Step 7: Watershed labeling
-  const labels = watershedLabeling(binary, dist, w, h);
-
-  // Step 8: Extract contours
-  const contours = extractContours(labels, w, h, binary);
+  // Step 5: Extract contours using Moore boundary tracing
+  const contours = extractContours(labels, w, h, count);
 
   const processingTime = performance.now() - start;
-
-  return { contours, mask: binary, width: w, height: h, processingTime };
+  return { contours, mask, width: w, height: h, processingTime };
 }
 
 // ── Apply Binary Mask (Blackout) ──
@@ -458,24 +376,26 @@ export function applyBlackoutMask(
   const out = new ImageData(w, h);
   const outData = out.data;
 
-  // Create mask from contours using flood fill from contour interiors
+  // Build mask from contour fill using scanline
   const mask = new Uint8Array(w * h);
 
   for (const contour of contours) {
-    const { x: bx, y: by, w: bw, h: bh } = contour.boundingBox;
+    const pts = contour.points;
+    if (pts.length < 3) continue;
 
-    // Rasterize: for each scanline in bounding box, check if pixel is inside contour
-    // Use ray-casting for point-in-polygon test on the contour points
-    for (let y = by; y < Math.min(by + bh, h); y++) {
-      for (let x = bx; x < Math.min(bx + bw, w); x++) {
-        if (isPointInContour(x, y, contour.points)) {
+    // Scanline fill using ray-casting
+    const bb = contour.boundingBox;
+    for (let y = bb.y; y < Math.min(bb.y + bb.h, h); y++) {
+      // Count crossings for each x
+      for (let x = bb.x; x < Math.min(bb.x + bb.w, w); x++) {
+        if (isPointInPolygon(x, y, pts)) {
           mask[y * w + x] = 255;
         }
       }
     }
   }
 
-  // Apply mask: keep pixels inside, black outside
+  // Apply: keep inside, black outside
   for (let i = 0; i < w * h; i++) {
     if (mask[i] > 0) {
       outData[i * 4] = data[i * 4];
@@ -483,31 +403,29 @@ export function applyBlackoutMask(
       outData[i * 4 + 2] = data[i * 4 + 2];
       outData[i * 4 + 3] = 255;
     } else {
-      outData[i * 4] = 0;
-      outData[i * 4 + 1] = 0;
-      outData[i * 4 + 2] = 0;
-      outData[i * 4 + 3] = 255;
+      outData[i * 4 + 3] = 255; // black
     }
   }
 
   return out;
 }
 
-// Ray-casting point-in-polygon
-function isPointInContour(px: number, py: number, points: { x: number; y: number }[]): boolean {
+function isPointInPolygon(px: number, py: number, pts: { x: number; y: number }[]): boolean {
   let inside = false;
-  const n = points.length;
+  const n = pts.length;
   for (let i = 0, j = n - 1; i < n; j = i++) {
-    const xi = points[i].x, yi = points[i].y;
-    const xj = points[j].x, yj = points[j].y;
-    if ((yi > py) !== (yj > py) && px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
-      inside = !inside;
+    const yi = pts[i].y, yj = pts[j].y;
+    if ((yi > py) !== (yj > py)) {
+      const xi = pts[i].x, xj = pts[j].x;
+      if (px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
+        inside = !inside;
+      }
     }
   }
   return inside;
 }
 
-// ── Draw Contour Overlay on Canvas ──
+// ── Draw Contour Overlay ──
 export function drawContourOverlay(
   ctx: CanvasRenderingContext2D, contours: Contour[], w: number, h: number
 ): void {
@@ -517,8 +435,8 @@ export function drawContourOverlay(
     const pts = contour.points;
     if (pts.length < 3) continue;
 
-    // Fill with translucent color
-    ctx.fillStyle = contour.color + '18';
+    // Semi-transparent fill
+    ctx.fillStyle = contour.color + '22';
     ctx.beginPath();
     ctx.moveTo(pts[0].x, pts[0].y);
     for (let i = 1; i < pts.length; i++) {
@@ -527,10 +445,11 @@ export function drawContourOverlay(
     ctx.closePath();
     ctx.fill();
 
-    // Stroke border
+    // Solid stroke
     ctx.strokeStyle = contour.color;
     ctx.lineWidth = 2;
-    ctx.shadowBlur = 6;
+    ctx.lineJoin = 'round';
+    ctx.shadowBlur = 4;
     ctx.shadowColor = contour.color;
     ctx.beginPath();
     ctx.moveTo(pts[0].x, pts[0].y);
@@ -541,10 +460,10 @@ export function drawContourOverlay(
     ctx.stroke();
     ctx.shadowBlur = 0;
 
-    // Label
+    // Area label at top of bounding box
     const bb = contour.boundingBox;
     ctx.fillStyle = contour.color;
-    ctx.font = 'bold 10px monospace';
-    ctx.fillText(`${contour.area}px²`, bb.x + 2, bb.y - 4);
+    ctx.font = 'bold 11px monospace';
+    ctx.fillText(`${contour.area}px²`, bb.x + 4, bb.y - 6);
   }
 }
